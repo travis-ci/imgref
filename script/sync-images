@@ -41,6 +41,8 @@ main() {
   local tmpdir
   tmpdir="$(mktemp -d /var/tmp/job-board-sync.XXXXX)"
 
+  trap 'rm -rf "${tmpdir}"' EXIT
+
   __dump_images "${src}" "${infra}" "${tmpdir}/dump-src.json"
   __dump_images "${dest}" "${infra}" "${tmpdir}/dump-dest.json"
   __upsert_dest "${dest}" "${infra}" "${tmpdir}" "${filter}"
@@ -65,7 +67,10 @@ __dump_images() {
   local tmpfile="${3}"
 
   echo "---> dumping to ${tmpfile}"
-  curl -sSL "${url}/images?infra=${infra}" >"${tmpfile}"
+  if ! curl -sSL "${url}/images?infra=${infra}" >"${tmpfile}"; then
+    echo "ERROR: failed to dump images from ${url}" >&2
+    exit 1
+  fi
 }
 
 __upsert_dest() {
@@ -76,13 +81,20 @@ __upsert_dest() {
 
   echo "---> loading from ${tmpdir}/dump-src.json"
   for args in $(__json_to_qs "${filter}" <"${tmpdir}/dump-src.json"); do
-    (
-      echo "syncing ${args}"
-      curl -fsSL -X PUT "${dest}/images?${args}" || (
-        curl -fsSL -X POST "${dest}/images?${args}" \
-          || echo "ERROR: failed to sync ${args}"
-      )
-    ) 2>&1 | sed 's/^/     /'
+    local name
+    name=$(echo "${args}" | grep -oP 'name=\K[^&]+')
+    if ! grep -q "\"name\":\"${name}\"" "${tmpdir}/dump-dest.json"; then
+      (
+        echo "syncing ${args}"
+        if ! curl -fsSL -X PUT "${dest}/images?${args}"; then
+          if ! curl -fsSL -X POST "${dest}/images?${args}"; then
+            echo "ERROR: failed to sync ${args}" >&2
+          fi
+        fi
+      ) 2>&1 | sed 's/^/     /'
+    else
+      echo "skipping ${name}, already exists in destination"
+    fi
   done
 }
 
@@ -103,9 +115,9 @@ __delete_dest() {
       )"
       if [[ "${src_name}" != "${name}" ]]; then
         echo "${name} not found in src, deleting from dest ${args}"
-        curl -fsSL -X DELETE "${dest}/images?${args}" || (
-          echo "ERROR: failed to delete ${args}"
-        )
+        if ! curl -fsSL -X DELETE "${dest}/images?${args}"; then
+          echo "ERROR: failed to delete ${args}" >&2
+        fi
       fi
     ) 2>&1 | sed 's/^/     /'
   done
@@ -143,7 +155,7 @@ __ensure_jq() {
 
   mkdir -p "${TMPDIR}/jq-bin"
   curl -sSL -o "${TMPDIR}/jq-bin/jq" \
-    "https://github.com/stedolan/jq/releases/download/jq-1.5/jq-linux64"
+    "https://github.com/stedolan/jq/releases/download/jq-1.7.1/jq-linux64"
   chmod +x "${TMPDIR}/jq-bin/jq"
   export PATH="${TMPDIR}/jq-bin:${PATH}"
 }
